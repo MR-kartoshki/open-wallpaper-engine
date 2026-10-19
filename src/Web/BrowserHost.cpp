@@ -473,7 +473,7 @@ void BrowserHost::Shutdown() {
             rstd::thread::sleep(rstd::time::Duration::from_millis(u64(10)));
         }
         impl_->client = nullptr;
-        impl_->osr = nullptr;
+        impl_->osr    = nullptr;
         CefShutdown();
         impl_->initialised = false;
     }
