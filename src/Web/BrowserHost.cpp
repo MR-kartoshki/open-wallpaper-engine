@@ -149,6 +149,7 @@ struct BrowserHost::Impl {
     Option<AudioDemandCallback>      audio_demand_cb;
     Atomic<bool>                     should_exit { false };
     bool                             initialised { false };
+    bool                             browser_open { false };
     // Stash the original argv from RunOrExitIfHelper; CefInitialize needs
     // the real argv to derive the per-child --type=… / --icu-data-file=…
     // switches it forwards to subprocesses.
@@ -294,6 +295,7 @@ bool BrowserHost::OpenWallpaper(const WebManifest& manifest, ref<Path> workshop_
         new ClientHandler(manifest.user_props.clone(), impl_->osr, opts.initially_muted);
     impl_->client->SetAudioDemandCallback(impl_->audio_demand_cb.clone());
     impl_->client->SetCloseCallback(Box<dyn<Fn<void()>>>::make([this] {
+        impl_->browser_open = false;
         impl_->should_exit.store(true, Ordering::SeqCst);
     }));
 
@@ -309,6 +311,7 @@ bool BrowserHost::OpenWallpaper(const WebManifest& manifest, ref<Path> workshop_
 
     const bool created = CefBrowserHost::CreateBrowser(
         info, impl_->client.get(), url, browser_settings, nullptr, nullptr);
+    impl_->browser_open = created;
     if (! created) {
         eprintln("weweb: CefBrowserHost::CreateBrowser failed for {}",
                  rstd::cppstd::as_str(url).unwrap());
@@ -457,6 +460,20 @@ void BrowserHost::RequestClose() { impl_->should_exit.store(true, Ordering::SeqC
 
 void BrowserHost::Shutdown() {
     if (impl_->initialised) {
+        bool close_requested = false;
+        // Browser creation may still be pending when shutdown starts.
+        while (impl_->browser_open) {
+            if (! close_requested) {
+                if (auto browser = impl_->client->GetBrowser()) {
+                    browser->GetHost()->CloseBrowser(true);
+                    close_requested = true;
+                }
+            }
+            CefDoMessageLoopWork();
+            rstd::thread::sleep(rstd::time::Duration::from_millis(u64(10)));
+        }
+        impl_->client = nullptr;
+        impl_->osr = nullptr;
         CefShutdown();
         impl_->initialised = false;
     }
