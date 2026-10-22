@@ -220,9 +220,10 @@ void AppHandler::OnContextCreated(CefRefPtr<CefBrowser> /*browser*/, CefRefPtr<C
     if (! frame || ! context) return;
 
     // Cancel selection in every frame without blocking wallpaper mouse handlers.
-    frame->ExecuteJavaScript(
-        "window.addEventListener('selectstart', function(event) { event.preventDefault(); }, true);",
-        "weweb://internal/disable_selection.js", 0);
+    frame->ExecuteJavaScript("window.addEventListener('selectstart', function(event) { "
+                             "event.preventDefault(); }, true);",
+                             "weweb://internal/disable_selection.js",
+                             0);
 
     if (! frame->IsMain()) return;
 
