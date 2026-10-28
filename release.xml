@@ -1,3 +1,22 @@
+<release version="0.3.2" date="2026-10-29">
+  <description>
+    <p>Added:</p>
+    <ul>
+      <li>Report available Workshop wallpaper updates from Steam's local records. #161 by @MR-kartoshki</li>
+    </ul>
+    <p>Fixes:</p>
+    <ul>
+      <li>Prevent text selection in web wallpapers without blocking mouse interactions. #166 by @MR-kartoshki</li>
+      <li>Staging-buffer memory leak caused by repeated uploads when the display is busy.</li>
+    </ul>
+    <p>Improved:</p>
+    <ul>
+      <li>Bound idle staging-buffer caches and reclaim unused upload memory during pauses.</li>
+      <li>Use the Chromium Eigen mirror for build downloads. #170 by @degenerate-kun-69</li>
+    </ul>
+  </description>
+</release>
+
 <release version="0.3.1" date="2026-10-20">
   <description>
     <p>Added:</p>
