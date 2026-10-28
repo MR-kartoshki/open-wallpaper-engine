@@ -135,6 +135,7 @@ public:
     void drawFrame(Scene&);
     bool framePending() const;
     bool frameSubmitted() const;
+    bool maintainResources();
 
     void configureRenderTargets(Scene&);
     void invalidatePreparedRenderItems(slice<RenderItemId>, PassInvalidationFlags);

@@ -55,6 +55,7 @@ public:
         -> Result<PrepareOutcome, ScenePrepareError>;
     auto retryPreparation(SceneLoadBenchRecorderView = {})
         -> Result<PrepareOutcome, ScenePrepareError>;
+    bool acknowledgeFrameSubmitted();
     auto refreshMaterials() -> Result<PrepareOutcome, ScenePrepareError>;
     void setFillMode(FillMode);
     bool resize(unsigned width, unsigned height);
@@ -96,7 +97,8 @@ private:
         BeforeRuntime,
         Resources,
         Video,
-        Fonts
+        Fonts,
+        Prepared
     };
     FrameWork m_frame_work { FrameWork::Idle };
     double    m_frame_time {};

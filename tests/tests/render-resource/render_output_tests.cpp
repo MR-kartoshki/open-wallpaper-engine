@@ -25,9 +25,12 @@ namespace
 namespace vk  = vrento::vulkan;
 namespace tex = vrento::texture;
 struct OutputCounts {
-    unsigned acquired {}, submitted {}, aborted {};
-    unsigned width { 64 }, height { 64 };
-    bool     reject_next {};
+    unsigned                          acquired {}, submitted {}, aborted {};
+    unsigned                          width { 64 }, height { 64 };
+    bool                              reject_next {};
+    vrento::FrameSurfaceAcquireStatus acquire_status {
+        vrento::FrameSurfaceAcquireStatus::Acquired
+    };
 };
 class OutputSurface : public vrento::ExSwapchain {
     vk::DeviceSession             session_;
@@ -69,6 +72,8 @@ public:
     bool     ready() const override { return true; }
     void     setOnReadyChanged(Option<vrento::ExSwapchainReadyCallback>) override {}
     auto     acquireRenderTarget() -> vrento::FrameSurfaceAcquireResult override {
+        if (counts_->acquire_status != vrento::FrameSurfaceAcquireStatus::Acquired)
+            return { .status = counts_->acquire_status };
         resize();
         ++counts_->acquired;
         vrento::FrameSurfaceIdentity identity { u64(1), u32(), u64(++serial_) };
@@ -394,14 +399,20 @@ TEST(RenderOutput, ShaderDirtyAndTopology) {
     info.width = info.height  = 64;
     info.msaa_samples         = 4;
     info.pipeline_preparation = vk::PipelinePreparationMode::Deferred;
+    auto counts               = rstd::sync::Arc<OutputCounts>::make();
     auto factory =
         [&](const owe::RenderInitInfo::ExSwapchainHandles&) -> Option<vrento::ExSwapchainOwner> {
-        return Some(vrento::ExSwapchain::Make<OutputSurface>(renderer.deviceSession().unwrap()));
+        return Some(vrento::ExSwapchain::Make<OutputSurface>(renderer.deviceSession().unwrap(),
+                                                             counts.clone()));
     };
     info.ex_swapchain_factory =
         Some(Box<dyn<FnOnce<Option<vrento::ExSwapchainOwner>(
                  const owe::RenderInitInfo::ExSwapchainHandles&)>>>::make(rstd::move(factory)));
     owe::SceneRenderPipeline pipeline(scene, *parsed.runtime_input, renderer);
+    unsigned                 evaluations {};
+    scene.RegisterTransformUpdater(Box<dyn<FnMut<void(f64)>>>::make([&](f64) {
+        ++evaluations;
+    }));
     EXPECT_TRUE(pipeline.rebuild().is_err());
     auto initial_failure = pipeline.diagnostics().last_failure;
     ASSERT_TRUE(initial_failure);
@@ -428,12 +439,36 @@ TEST(RenderOutput, ShaderDirtyAndTopology) {
         ASSERT_EQ(data[index + usize(2)], u8(blue));
     };
     auto prepare = [&] {
-        scene.PassFrameTime(1.0 / 60.0);
         ready(pipeline.prepare({ .frametime = 1.0f / 60.0f }));
+    };
+    auto draw = [&] {
+        renderer.drawFrame(scene);
+        ASSERT_TRUE(renderer.frameSubmitted());
+        ASSERT_TRUE(pipeline.acknowledgeFrameSubmitted());
+        ASSERT_FALSE(pipeline.acknowledgeFrameSubmitted());
+        scene.PassFrameTime(1.0 / 60.0);
     };
     ready(pipeline.rebuild());
     prepare();
-    renderer.drawFrame(scene);
+    auto       waiting_uploads = renderer.diagnostics().resources.buffer_uploads;
+    const auto waiting_time    = scene.Runtime().Frame().elapsed;
+    for (unsigned retry {}; retry < 2000; ++retry) {
+        counts->acquire_status = retry % 2 ? vrento::FrameSurfaceAcquireStatus::Busy
+                                           : vrento::FrameSurfaceAcquireStatus::NotReady;
+        ASSERT_EQ(pipeline.retryPreparation().unwrap(), owe::PrepareOutcome::Ready);
+        ASSERT_EQ(pipeline.prepare({ .frametime = 99 }).unwrap(), owe::PrepareOutcome::Ready);
+        renderer.drawFrame(scene);
+        ASSERT_FALSE(renderer.frameSubmitted());
+        ASSERT_TRUE(pipeline.pending().frame);
+    }
+    EXPECT_EQ(evaluations, 1u);
+    EXPECT_EQ(pipeline.stats().prepared_frames, 1u);
+    EXPECT_EQ(scene.Runtime().Frame().elapsed, waiting_time);
+    for (unsigned category {}; category < 5; ++category)
+        EXPECT_EQ(renderer.diagnostics().resources.buffer_uploads.queued_bytes[category],
+                  waiting_uploads.queued_bytes[category]);
+    counts->acquire_status = vrento::FrameSurfaceAcquireStatus::Acquired;
+    draw();
     color(255, 0, 0);
     auto before = pipeline.stats();
     rstd_assert(before.graph_builds == 1);
@@ -449,7 +484,7 @@ TEST(RenderOutput, ShaderDirtyAndTopology) {
     EXPECT_TRUE(vertices.SetVertexs(usize(), same_bytes.as_slice()));
     node->Mesh()->SetDirty(owe::SceneMeshDirtyData);
     prepare();
-    renderer.drawFrame(scene);
+    draw();
     color(255, 0, 0);
     EXPECT_EQ(pipeline.stats().graph_builds, before.graph_builds);
     EXPECT_EQ(pipeline.stats().graph_analysis.attempts, before.graph_analysis.attempts);
@@ -466,7 +501,7 @@ TEST(RenderOutput, ShaderDirtyAndTopology) {
     rstd_assert(
         scene.SetMaterialShaderValue(*material, "g_Color"_str, owe::ShaderValue(green, usize(3))));
     prepare();
-    renderer.drawFrame(scene);
+    draw();
     color(0, 255, 0);
     rstd_assert(pipeline.stats().graph_builds == before.graph_builds);
     rstd_assert(queue.session().graphics_resources().pipelines.stats().creations ==
@@ -476,16 +511,36 @@ TEST(RenderOutput, ShaderDirtyAndTopology) {
                       pipeline_creations);
     node->SetUserAlpha(0);
     prepare();
-    renderer.drawFrame(scene);
+    draw();
     color(0, 0, 255);
     node->SetUserAlpha(1);
     auto changed       = material->Pipeline();
     changed.depth_test = changed.depth_write = true;
     rstd_assert(material->SetPipeline(changed));
     prepare();
-    renderer.drawFrame(scene);
+    draw();
     color(0, 255, 0);
     rstd_assert(pipeline.stats().graph_builds > before.graph_builds);
+
+    prepare();
+    const auto resize_evaluations = evaluations;
+    const auto resize_frames      = pipeline.stats().prepared_frames;
+    const auto resize_time        = scene.Runtime().Frame().elapsed;
+    counts->acquire_status        = vrento::FrameSurfaceAcquireStatus::Busy;
+    renderer.drawFrame(scene);
+    ASSERT_FALSE(renderer.frameSubmitted());
+    counts->width = 96;
+    (void)pipeline.resize(96, 64);
+    ready(pipeline.retryPreparation());
+    ASSERT_TRUE(pipeline.pending().frame);
+    EXPECT_EQ(evaluations, resize_evaluations);
+    EXPECT_EQ(pipeline.stats().prepared_frames, resize_frames);
+    EXPECT_EQ(scene.Runtime().Frame().elapsed, resize_time);
+    counts->acquire_status = vrento::FrameSurfaceAcquireStatus::Acquired;
+    draw();
+    auto resized = pixels(queue, renderer.renderedTarget("_rt_default"_str).unwrap().take_ready());
+    EXPECT_EQ(resized.len(), usize(96 * 64 * 4));
+    EXPECT_EQ(resized[usize((32 * 96 + 48) * 4 + 1)], u8(255));
     renderer.destroy();
     rstd_assert(queue.session().validation_errors() == 0);
 }
@@ -586,6 +641,7 @@ TEST(RenderOutput, IgnoresInactiveSamplerContentsAndFeedback) {
         renderer.drawFrame(scene);
         ASSERT_FALSE(renderer.diagnostics().frame_error);
         ASSERT_TRUE(renderer.frameSubmitted());
+        ASSERT_TRUE(pipeline.acknowledgeFrameSubmitted());
         scene.PassFrameTime(1.0 / 60.0);
         auto data = pixels(queue, renderer.renderedTarget("_rt_default"_str).unwrap().take_ready());
         auto center = usize((32 * 64 + 32) * 4);
@@ -658,6 +714,7 @@ TEST(RenderOutput, DynamicFontUploads) {
     scene.PassFrameTime(1.0 / 60.0);
     ready(pipeline.prepare({ .frametime = 1.0f / 60.0f, .runtime = 0.01f }));
     renderer.drawFrame(scene);
+    ASSERT_TRUE(pipeline.acknowledgeFrameSubmitted());
     auto first = pixels(queue, renderer.renderedTarget("_rt_default"_str).unwrap().take_ready());
     rstd_assert(dirty() == usize());
     usize ink;
@@ -668,6 +725,7 @@ TEST(RenderOutput, DynamicFontUploads) {
     ready(pipeline.prepare({ .frametime = 1.0f / 60.0f, .runtime = 0.03f }));
     rstd_assert(dirty() > usize());
     renderer.drawFrame(scene);
+    ASSERT_TRUE(pipeline.acknowledgeFrameSubmitted());
     auto second = pixels(queue, renderer.renderedTarget("_rt_default"_str).unwrap().take_ready());
     rstd_assert(first != second && dirty() == usize());
     renderer.destroy();

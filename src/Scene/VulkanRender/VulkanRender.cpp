@@ -58,6 +58,8 @@ struct HostOutputFrame {
     Option<owe::FrameSurfaceCompletionCapability> completion;
     Option<rstd::uint32_t>                        window_image;
     bool                                          blocked {};
+    SceneRenderUpdateProgress                     updates;
+    Option<vrento::texture::Submission>           work;
 };
 
 struct ViewerSurfaceFactory {
@@ -267,6 +269,7 @@ struct VulkanRender::Impl {
                             Vec<vrento::resource_registry::PreparedTextureUpdate>&)
         -> Result<empty, resource::ResourceError>;
     bool beginFrame(vrento::texture::Submission);
+    bool prepareOutputFrame(Scene&);
     bool executeFrame();
     void reportFrameError(vrento::vulkan::GraphExecutionError);
     void failOutput(bool uncertain = false);
@@ -527,6 +530,26 @@ void VulkanRender::Impl::failOutput(bool uncertain) {
     }
     m_renderer->clear();
 }
+bool VulkanRender::Impl::prepareOutputFrame(Scene& scene) {
+    if (m_output->blocked) return false;
+    if (m_frame) return true;
+    auto& rr = m_rendering_resources;
+    if (! m_output->work) {
+        auto started = rr.resources.BeginFrame();
+        if (started.is_err()) return false;
+        m_output->work = Some(started.unwrap());
+    }
+    auto textures = dyn<SceneTextureAnimationView>::from_ref(scene);
+    if (! m_scene_render_state.update(
+            scene.Runtime().Frame(), m_extent, textures.as_ref(), rr, m_output->updates))
+        return false;
+    if (! beginFrame(m_output->work.take().unwrap())) {
+        failOutput();
+        return false;
+    }
+    return true;
+}
+
 bool VulkanRender::Impl::executeFrame() {
     if (! m_frame || ! m_output || m_output->blocked) return false;
     if (m_frame->state() == FrameState::Pending) {
@@ -612,6 +635,11 @@ void VulkanRender::destroy() { pImpl->destroy(); }
 void VulkanRender::drawFrame(Scene& scene) { pImpl->drawFrame(scene); }
 bool VulkanRender::framePending() const {
     return (pImpl->m_frame.is_some() || pImpl->m_output.is_some());
+}
+bool VulkanRender::maintainResources() {
+    if (! pImpl->m_inited) return false;
+    auto memory = dyn<MemoryBudgetSource>::from_ref(*pImpl->m_device);
+    return pImpl->m_rendering_resources.resources.Collect(memory.as_ref());
 }
 bool VulkanRender::frameSubmitted() const { return pImpl->m_frame_submitted; }
 
@@ -1013,9 +1041,6 @@ void VulkanRender::Impl::drawFrameSwapchain(Scene& scene) {
     auto& rr = m_rendering_resources;
     if (! m_output) {
         if (waitForPreparedUploads(rr).is_err()) return;
-        auto textures = dyn<SceneTextureAnimationView>::from_ref(scene);
-        if (! m_scene_render_state.update(scene.Runtime().Frame(), m_extent, textures.as_ref(), rr))
-            return;
         auto synchronization = createFrameSynchronization(false);
         if (! synchronization) return;
         auto           owner = synchronization.take().unwrap();
@@ -1044,12 +1069,8 @@ void VulkanRender::Impl::drawFrameSwapchain(Scene& scene) {
         if (target.is_err()) rstd::panic("invalid acquired window target");
         m_output =
             Some(HostOutputFrame { target.unwrap(), rstd::move(owner), None(), Some(image_index) });
-        auto started = rr.resources.BeginFrame();
-        if (started.is_err() || ! beginFrame(started.unwrap())) {
-            failOutput();
-            return;
-        }
     }
+    if (! prepareOutputFrame(scene)) return;
     if (! executeFrame()) return;
     auto             index = *m_output->window_image;
     VkPresentInfoKHR info { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
@@ -1079,9 +1100,6 @@ void VulkanRender::Impl::drawFrameOffscreen(Scene& scene) {
             (*m_ex_swapchain)->AsSwapchain().height() != m_extent.height)
             return;
         if (waitForPreparedUploads(rr).is_err()) return;
-        auto textures = dyn<SceneTextureAnimationView>::from_ref(scene);
-        if (! m_scene_render_state.update(scene.Runtime().Frame(), m_extent, textures.as_ref(), rr))
-            return;
         auto synchronization = createFrameSynchronization(true);
         if (! synchronization) return;
         auto acquired = (*m_ex_swapchain)->AsSwapchain().acquireRenderTarget();
@@ -1093,14 +1111,10 @@ void VulkanRender::Impl::drawFrameOffscreen(Scene& scene) {
         auto target = vrento::vulkan::SurfaceTarget::create(
             *m_session, acquired.lease, Arc<dyn<rstd::any::Any>>::make(owner.clone()));
         if (target.is_err()) return;
-        m_output     = Some(HostOutputFrame {
+        m_output = Some(HostOutputFrame {
             target.unwrap(), rstd::move(owner), Some(rstd::move(acquired.completion)), None() });
-        auto started = rr.resources.BeginFrame();
-        if (started.is_err() || ! beginFrame(started.unwrap())) {
-            failOutput();
-            return;
-        }
     }
+    if (! prepareOutputFrame(scene)) return;
     if (! executeFrame()) return;
     int sync_fd = -1;
     if (m_device->handle().Dispatch().vkGetSemaphoreFdKHR) {

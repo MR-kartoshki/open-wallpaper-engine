@@ -139,6 +139,10 @@ inline void FinalizeRenderTargetSizes(owe::Scene& scene, VkExtent2D extent,
     }
 }
 
+struct SceneRenderUpdateProgress {
+    usize uniforms {}, draws {};
+};
+
 class SceneRenderState {
     resource::ResourcePlan             resource_plan;
     Option<vrento::vulkan::GraphInput> input_;
@@ -426,15 +430,17 @@ public:
     }
 
     bool update(const SceneFrame& frame, VkExtent2D extent,
-                ref<dyn<SceneTextureAnimationView>> textures, RenderingResources& rr) {
+                ref<dyn<SceneTextureAnimationView>> textures, RenderingResources& rr,
+                SceneRenderUpdateProgress& progress) {
         auto buffer_writer = dyn<resource::BufferContentWriter>::from_ref(rr.resources);
         SceneRenderUniformFrameContext frame_context(
             frame,
             { static_cast<float>(extent.width), static_cast<float>(extent.height) },
             textures);
         auto context = dyn<UniformBufferFrameContext>::from_ref(frame_context);
-        for (auto& binding : uniform_update_owners) {
-            auto result = binding->Update(context.as_ref(), buffer_writer.as_mut_ref());
+        for (; progress.uniforms < uniform_update_owners.len(); ++progress.uniforms) {
+            auto& binding = uniform_update_owners[progress.uniforms];
+            auto  result  = binding->Update(context.as_ref(), buffer_writer.as_mut_ref());
             if (result.is_err()) {
                 auto error = rstd::move(result).unwrap_err_unchecked();
                 rstd_error("update uniform buffer failed: {}", error.message.as_str());
@@ -442,8 +448,9 @@ public:
             }
         }
         auto graphics = dyn<resource_registry::GraphicsResourcePreparer>::from_ref(rr.resources);
-        for (auto& entry : draws) {
-            auto                  uses = entry.source->resourceUses();
+        for (; progress.draws < draws.len(); ++progress.draws) {
+            auto&                 entry = draws[progress.draws];
+            auto                  uses  = entry.source->resourceUses();
             PreparedPassResources resources(rr.resources.Prepared(), uses);
             DrawUpdateContext     update_context {
                 .buffers   = buffer_writer.as_mut_ref(),

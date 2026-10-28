@@ -57,7 +57,8 @@ auto SceneRenderPipeline::finishAttempt(Result<PrepareOutcome, ScenePrepareError
     -> Result<PrepareOutcome, ScenePrepareError> {
     if (result.is_err()) return failed(rstd::move(result).unwrap_err());
     if (*result == PrepareOutcome::Ready) m_attempt_active = false;
-    m_ready = *result == PrepareOutcome::Ready && m_frame_work == FrameWork::Idle;
+    m_ready = *result == PrepareOutcome::Ready &&
+              (m_frame_work == FrameWork::Idle || m_frame_work == FrameWork::Prepared);
     return result;
 }
 auto SceneRenderPipeline::takeGpuPreparation(bool graph) -> GpuPreparation {
@@ -247,13 +248,11 @@ auto SceneRenderPipeline::prepare(const script::FrameInputs& inputs,
                                   SceneLoadBenchRecorderView bench)
     -> Result<PrepareOutcome, ScenePrepareError> {
     if (m_render.framePending()) return Ok(PrepareOutcome::Pending);
-    if (m_gpu_preparation) return retryPreparation(bench);
+    if (m_gpu_preparation || m_frame_work != FrameWork::Idle) return retryPreparation(bench);
     beginAttempt();
     if (! m_render.inited())
         return failed(InvalidPreparation(vulkan::PrepareStateError::NotInitialized));
     if (! hasGraph()) return failed(InvalidPreparation());
-    if (m_frame_work != FrameWork::Idle)
-        return failed(InvalidPreparation(vulkan::PrepareStateError::FrameUpdateActive));
     m_ready      = false;
     m_frame_time = inputs.frametime;
     m_scene.SetPointerPosition({ inputs.cursor_x, inputs.cursor_y });
@@ -279,6 +278,7 @@ auto SceneRenderPipeline::prepare(const script::FrameInputs& inputs,
 auto SceneRenderPipeline::retryPreparation(SceneLoadBenchRecorderView bench)
     -> Result<PrepareOutcome, ScenePrepareError> {
     if (m_render.framePending()) return Ok(PrepareOutcome::Pending);
+    if (m_frame_work == FrameWork::Prepared && ready()) return Ok(PrepareOutcome::Ready);
     beginAttempt();
     m_ready = false;
     if (! m_render.inited())
@@ -317,10 +317,18 @@ auto SceneRenderPipeline::retryPreparation(SceneLoadBenchRecorderView bench)
         return ScenePreparation(m_render.tryPumpFontAtlases(m_scene));
     }();
     if (fonts.is_err() || *fonts != PrepareOutcome::Ready) return finishAttempt(rstd::move(fonts));
-    if (m_frame_work != FrameWork::Idle) ++m_stats.prepared_frames;
-    m_frame_work = FrameWork::Idle;
-    m_ready      = true;
+    if (m_frame_work != FrameWork::Idle && m_frame_work != FrameWork::Prepared) {
+        ++m_stats.prepared_frames;
+        m_frame_work = FrameWork::Prepared;
+    }
+    m_ready = true;
     return finishAttempt(Ok(PrepareOutcome::Ready));
+}
+
+bool SceneRenderPipeline::acknowledgeFrameSubmitted() {
+    if (m_frame_work != FrameWork::Prepared) return false;
+    m_frame_work = FrameWork::Idle;
+    return true;
 }
 
 auto SceneRenderPipeline::refreshMaterials() -> Result<PrepareOutcome, ScenePrepareError> {
